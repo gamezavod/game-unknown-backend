@@ -14,7 +14,7 @@ cp .env.example .env
 # Generate each with: python -c 'import secrets; print(secrets.token_urlsafe(48))'
 # Set DATABASE_URL to match the PostgreSQL user/password/database (URL-encode password).
 uv sync --frozen
-docker compose up -d --wait
+docker compose up -d --wait db
 uv run alembic upgrade head
 uv run uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 ```
@@ -31,6 +31,54 @@ are HS256/HS384/HS512; all consumers must share the secret securely. Defaults:
 access 900 seconds, refresh/session 2592000 seconds, issuer `gamezavod`, audience
 `gamezavod-api`, 5 logins per source IP per 300 seconds. All settings are exposed
 in `.env.example`. Rotate the signing secret to invalidate all tokens.
+
+## Docker Compose
+
+`Dockerfile` builds a Python 3.12 image with only locked runtime dependencies.
+It runs as UID/GID 10001; `.dockerignore` allows only application, migration and
+dependency files into the build context. Secrets and `.env` stay outside the image.
+
+```sh
+cp .env.example .env  # Only on first setup; preserve an existing .env.
+# Set POSTGRES_PASSWORD and JWT_SECRET to independent random values.
+# Prefer URL-safe generated passwords (secrets.token_urlsafe).
+docker compose up -d --build --wait
+docker compose ps
+docker compose logs api migrate
+```
+
+Compose starts PostgreSQL, waits for its healthcheck, applies `alembic upgrade head`
+in a one-shot `migrate` container, then starts the API. A migration failure blocks
+API startup. Swagger is available on port 8000 at `/docs`. The image healthcheck
+checks OpenAPI; use `uv run python scripts/smoke.py` for the full auth flow.
+
+`DATABASE_URL` in `.env` is for host development. Compose supplies an internal URL
+using host `db` and the `POSTGRES_*` settings. If a username/password contains URL
+reserved characters, set `COMPOSE_DATABASE_URL` with percent-encoded credentials;
+keep `POSTGRES_PASSWORD` as the original raw password. `API_PORT` and
+`POSTGRES_PORT` change host ports. Defaults bind only to 127.0.0.1. Stop a host
+Uvicorn before using the same API port. For remote deployment, configure an
+explicit bind/reverse proxy and TLS.
+
+```sh
+docker compose stop                     # Preserve containers and database volume.
+docker compose down                     # Remove containers; preserve database volume.
+docker compose up -d --build --wait      # Rebuild/update and run migrations.
+# For Python development on the host, start only the database:
+docker compose up -d --wait db
+```
+
+Do not use `down -v` unless you intend to delete database data. Changing
+`POSTGRES_PASSWORD` does not change the password in an existing initialized
+volume; rotate the database role password separately.
+
+For a TLS-inspecting build proxy, the optional `proxy_ca` BuildKit secret supplies
+a trusted combined CA bundle without storing it in image layers:
+
+```sh
+docker build --secret id=proxy_ca,src=/path/to/combined-ca.pem -t gamezavod-backend:local .
+docker compose up -d --wait --no-build
+```
 
 ## API and architecture
 

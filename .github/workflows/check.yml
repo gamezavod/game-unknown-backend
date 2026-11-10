@@ -30,3 +30,31 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy app tests migrations scripts
       - run: uv run python scripts/check.py
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+      - name: Generate ephemeral container credentials
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import secrets
+          password = secrets.token_urlsafe(32)
+          key = secrets.token_urlsafe(48)
+          Path('.env').write_text(
+              f'POSTGRES_PASSWORD={password}\nJWT_SECRET={key}\n'
+          )
+          PY
+      - run: docker compose config --quiet
+      - run: docker compose up -d --build --wait
+      - run: uv sync --frozen --python 3.12
+      - run: uv run python scripts/smoke.py
+      - name: Container logs
+        if: failure()
+        run: docker compose logs api migrate db
+      - name: Clean up disposable CI stack
+        if: always()
+        run: docker compose down -v
