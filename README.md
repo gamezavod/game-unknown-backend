@@ -147,3 +147,15 @@ replay family detection and admin management are outside this change.
 Schedule deletion of expired/revoked sessions and expired login buckets in
 production; no background scheduler is included. Back up PostgreSQL and provide
 monitoring, TLS termination and secret management before public deployment.
+
+## World generation and progress
+
+Public guest world generation and versioned PostgreSQL saves are available under
+`/game/session`, `/game/progress` and `/game/actions`. They reuse the existing
+SQLAlchemy and Alembic architecture. Apply migrations through `003_guest_worlds`
+before starting. Game routes temporarily require no JWT: `/game/session` returns
+a `playerId` and remembers it in a cookie; `?player_id=<UUID>` selects a world
+explicitly. Existing `/auth/*` and `/me` behavior is unchanged.
+No dependencies or frontend files were changed. The API contract, generation
+assumptions, save format and client integration boundaries are documented in
+[docs/world-and-saves.md](docs/world-and-saves.md).

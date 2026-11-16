@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     refresh_ttl_seconds: int = Field(default=2592000, gt=0)
     login_max_attempts: int = Field(default=5, gt=0)
     login_window_seconds: int = Field(default=300, gt=0)
+    sapling_growth_ms: int = Field(default=60000, gt=0)
+    max_save_bytes: int = Field(default=10485760, gt=0)
 
     @model_validator(mode="after")
     def validate_database(self) -> "Settings":

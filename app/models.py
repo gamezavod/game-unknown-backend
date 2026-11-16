@@ -1,7 +1,15 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -34,3 +42,18 @@ class LoginBucket(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     attempts: Mapped[int]
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class WorldSave(Base):
+    __tablename__ = "world_saves"
+    __table_args__ = (
+        CheckConstraint("server_saved_at >= 0", name="ck_world_saved_at"),
+        UniqueConstraint("user_id", name="uq_world_saves_user_id"),
+    )
+
+    player_id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+    data: Mapped[dict[str, object]] = mapped_column(JSONB)
+    server_saved_at: Mapped[int] = mapped_column(BigInteger)

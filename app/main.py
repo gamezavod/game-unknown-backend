@@ -6,12 +6,22 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.routes import router
 from app.services import AuthError
+from app.world.routes import router as world_router
+from app.world.service import WorldError
 
 
 def create_app() -> FastAPI:
     get_settings()
     app = FastAPI(title="GameZavod API")
     app.include_router(router)
+    app.include_router(world_router)
+
+    @app.exception_handler(WorldError)
+    async def world_error(request: Request, exc: WorldError) -> JSONResponse:
+        content: dict[str, object] = {"detail": exc.detail}
+        if exc.current is not None:
+            content["current"] = exc.current.model_dump(mode="json")
+        return JSONResponse(status_code=exc.status, content=content)
 
     @app.exception_handler(AuthError)
     async def auth_error(request: Request, exc: AuthError) -> JSONResponse:
