@@ -147,3 +147,12 @@ replay family detection and admin management are outside this change.
 Schedule deletion of expired/revoked sessions and expired login buckets in
 production; no background scheduler is included. Back up PostgreSQL and provide
 monitoring, TLS termination and secret management before public deployment.
+
+## World generation and progress
+
+Authenticated world generation and versioned PostgreSQL saves are available under
+`/game/session`, `/game/progress` and `/game/actions`. They reuse the existing JWT,
+SQLAlchemy and Alembic architecture. Apply `002_world_progress` before starting.
+No dependencies or frontend files were changed. The API contract, generation
+assumptions, save format and client integration boundaries are documented in
+[docs/world-and-saves.md](docs/world-and-saves.md).
