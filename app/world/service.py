@@ -23,9 +23,11 @@ class WorldError(Exception):
         self.status, self.detail, self.current = status, detail, current
 
 
-def wire(save: SaveGame) -> StoredSave:
+def wire(save: SaveGame, player_id: UUID) -> StoredSave:
     assert save.serverSavedAt is not None
-    return StoredSave(data=encode_save(save), serverSavedAt=save.serverSavedAt)
+    return StoredSave(
+        playerId=player_id, data=encode_save(save), serverSavedAt=save.serverSavedAt
+    )
 
 
 class WorldService:
@@ -69,27 +71,32 @@ class WorldService:
         )
         row.data = saved.model_dump()
         row.server_saved_at = stamp
+        player_id = row.player_id
         self.repo.commit()
-        return wire(saved)
+        return wire(saved, player_id)
 
-    def locked(self, user_id: UUID) -> tuple[WorldSave, SaveGame]:
-        row = self.repo.get(user_id, lock=True)
+    def locked(self, player_id: UUID) -> tuple[WorldSave, SaveGame]:
+        row = self.repo.get(player_id, lock=True)
         if row is None:
             self.repo.rollback()
             raise WorldError(404, "Сначала создайте мир")
         return row, self.read(row)
 
-    def check_stamp(self, save: SaveGame, expected: int | float | None) -> None:
+    def check_stamp(
+        self, save: SaveGame, expected: int | float | None, player_id: UUID
+    ) -> None:
         if expected != save.serverSavedAt:
             self.repo.rollback()
             raise WorldError(
-                409, "На сервере уже есть более свежее сохранение", wire(save)
+                409,
+                "На сервере уже есть более свежее сохранение",
+                wire(save, player_id),
             )
 
-    def open(self, user_id: UUID, body: OpenWorld) -> StoredSave:
-        row = self.repo.get(user_id)
+    def open(self, player_id: UUID, body: OpenWorld) -> StoredSave:
+        row = self.repo.get(player_id)
         if row is not None:
-            return self.load(user_id)
+            return self.load(player_id)
         if body.initialSave is not None:
             progress = self.decode(body.initialSave).progress
         else:
@@ -107,21 +114,21 @@ class WorldService:
             cloudPending=False,
             progress=progress,
         )
-        self.repo.add_if_missing(user_id, save.model_dump(), now)
-        # Один остров на аккаунт, включая одновременное создание с двух устройств.
-        return self.load(user_id)
+        self.repo.add_if_missing(player_id, save.model_dump(), now)
+        # Один остров на playerId, включая одновременное создание с двух устройств.
+        return self.load(player_id)
 
-    def load(self, user_id: UUID) -> StoredSave:
-        row, save = self.locked(user_id)
+    def load(self, player_id: UUID) -> StoredSave:
+        row, save = self.locked(player_id)
         grown = advance_growth(save.progress, self.repo.now_ms())
         if grown != save.progress:
             return self.record(row, grown, save)
         self.repo.commit()
-        return wire(save)
+        return wire(save, player_id)
 
-    def action(self, user_id: UUID, body: ActionRequest) -> StoredSave:
-        row, save = self.locked(user_id)
-        self.check_stamp(save, body.expectedServerSavedAt)
+    def action(self, player_id: UUID, body: ActionRequest) -> StoredSave:
+        row, save = self.locked(player_id)
+        self.check_stamp(save, body.expectedServerSavedAt, player_id)
         try:
             progress = apply_action(
                 save.progress,
@@ -134,13 +141,13 @@ class WorldService:
             raise WorldError(400, str(error)) from error
         if progress == save.progress:
             self.repo.commit()
-            return wire(save)
+            return wire(save, player_id)
         return self.record(row, progress, save)
 
-    def replace(self, user_id: UUID, body: SaveRequest) -> StoredSave:
+    def replace(self, player_id: UUID, body: SaveRequest) -> StoredSave:
         incoming = self.decode(body.data)
-        row, save = self.locked(user_id)
-        self.check_stamp(save, body.expectedServerSavedAt)
+        row, save = self.locked(player_id)
+        self.check_stamp(save, body.expectedServerSavedAt, player_id)
         if (
             incoming.progress.world.seed != save.progress.world.seed
             or incoming.progress.world.generatorVersion
@@ -157,5 +164,5 @@ class WorldService:
             raise WorldError(400, "Снимок теряет уже открытые клетки")
         if incoming.progress == save.progress:
             self.repo.commit()
-            return wire(save)
+            return wire(save, player_id)
         return self.record(row, incoming.progress, save)

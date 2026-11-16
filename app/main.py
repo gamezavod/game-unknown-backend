@@ -20,7 +20,7 @@ def create_app() -> FastAPI:
     async def world_error(request: Request, exc: WorldError) -> JSONResponse:
         content: dict[str, object] = {"detail": exc.detail}
         if exc.current is not None:
-            content["current"] = exc.current.model_dump()
+            content["current"] = exc.current.model_dump(mode="json")
         return JSONResponse(status_code=exc.status, content=content)
 
     @app.exception_handler(AuthError)

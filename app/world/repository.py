@@ -11,8 +11,8 @@ class WorldRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def get(self, user_id: UUID, *, lock: bool = False) -> WorldSave | None:
-        query = select(WorldSave).where(WorldSave.user_id == user_id)
+    def get(self, player_id: UUID, *, lock: bool = False) -> WorldSave | None:
+        query = select(WorldSave).where(WorldSave.player_id == player_id)
         if lock:
             query = query.with_for_update()
         return self.db.scalar(query)
@@ -30,12 +30,12 @@ class WorldRepository:
         return int(value)
 
     def add_if_missing(
-        self, user_id: UUID, data: dict[str, object], stamp: int
+        self, player_id: UUID, data: dict[str, object], stamp: int
     ) -> None:
         self.db.execute(
             insert(WorldSave)
-            .values(user_id=user_id, data=data, server_saved_at=stamp)
-            .on_conflict_do_nothing(index_elements=[WorldSave.user_id])
+            .values(player_id=player_id, data=data, server_saved_at=stamp)
+            .on_conflict_do_nothing(index_elements=[WorldSave.player_id])
         )
 
     def commit(self) -> None:

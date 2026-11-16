@@ -1,4 +1,5 @@
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import Field
 
@@ -34,5 +35,6 @@ class SaveRequest(Model):
 
 
 class StoredSave(Model):
+    playerId: UUID
     data: str
     serverSavedAt: Timestamp

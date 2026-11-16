@@ -1,5 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -15,51 +16,47 @@ from app.world.schemas import StoredSave
 from app.world.state import decode_save, encode_save
 
 
-def account(client: TestClient, email: str = "world@example.com") -> dict[str, str]:
-    data = {"email": email, "password": "a-long-world-test-password"}
-    assert client.post("/auth/register", json=data).status_code == 201
-    response = client.post("/auth/login", json=data)
-    assert response.status_code == 200
-    return {"Authorization": "Bearer " + response.json()["access_token"]}
+def player() -> dict[str, str]:
+    return {"player_id": str(uuid4())}
 
 
 def open_world(
-    client: TestClient, headers: dict[str, str], seed: str = "api"
+    client: TestClient, params: dict[str, str], seed: str = "api"
 ) -> StoredSave:
-    response = client.post("/game/session", headers=headers, json={"seed": seed})
+    response = client.post("/game/session", params=params, json={"seed": seed})
     assert response.status_code == 200, response.text
-    return StoredSave.model_validate(response.json())
+    return StoredSave.model_validate_json(response.text)
 
 
 def action(
     client: TestClient,
-    headers: dict[str, str],
+    params: dict[str, str],
     stored: StoredSave,
     body: dict[str, object],
 ) -> httpx.Response:
     response: httpx.Response = client.post(
         "/game/actions",
-        headers=headers,
+        params=params,
         json={"action": body, "expectedServerSavedAt": stored.serverSavedAt},
     )
 
     return response
 
 
-def test_authentication_and_user_isolation(client: TestClient) -> None:
-    assert client.get("/game/progress").status_code == 401
-    first, second = account(client), account(client, "other@example.com")
+def test_public_players_keep_separate_progress(client: TestClient) -> None:
+    assert client.get("/game/progress").status_code == 404
+    first, second = player(), player()
     a, b = open_world(client, first, "one"), open_world(client, second, "two")
     assert a != b
     assert (
         decode_save(
-            client.get("/game/progress?user_id=other", headers=first).json()["data"]
+            client.get("/game/progress?user_id=other", params=first).json()["data"]
         ).progress.world.seed
         == "one"
     )
     assert (
         decode_save(
-            client.get("/game/progress", headers=second).json()["data"]
+            client.get("/game/progress", params=second).json()["data"]
         ).progress.world.seed
         == "two"
     )
@@ -67,7 +64,7 @@ def test_authentication_and_user_isolation(client: TestClient) -> None:
     assert (
         client.put(
             "/game/progress",
-            headers=first,
+            params=first,
             json={"data": b.data, "expectedServerSavedAt": a.serverSavedAt},
         ).status_code
         == 400
@@ -75,24 +72,24 @@ def test_authentication_and_user_isolation(client: TestClient) -> None:
 
 
 def test_landscape_and_revealed_cells_persist(client: TestClient) -> None:
-    headers = account(client)
-    stored = open_world(client, headers, "landscape")
+    params = player()
+    stored = open_world(client, params, "landscape")
     forest = next(
         c for c in decode_save(stored.data).progress.world.cells if c.type == "forest"
     )
     response = action(
         client,
-        headers,
+        params,
         stored,
         {"type": "chopForest", "position": {"q": forest.q, "r": forest.r}},
     )
     assert response.status_code == 200
-    chopped = StoredSave.model_validate(response.json())
+    chopped = StoredSave.model_validate_json(response.text)
     response = action(
-        client, headers, chopped, {"type": "reveal", "position": {"q": 4, "r": 0}}
+        client, params, chopped, {"type": "reveal", "position": {"q": 4, "r": 0}}
     )
     assert response.status_code == 200
-    saved = decode_save(client.get("/game/progress", headers=headers).json()["data"])
+    saved = decode_save(client.get("/game/progress", params=params).json()["data"])
     assert len(saved.progress.world.cells) == 38
     assert all(c.state == "visible" for c in saved.progress.world.cells)
     assert (
@@ -100,14 +97,14 @@ def test_landscape_and_revealed_cells_persist(client: TestClient) -> None:
         == "grass"
     )
     with Session(get_engine()) as db:
-        assert db.scalars(select(WorldSave)).one().data == saved.model_dump()
+        assert db.scalars(select(WorldSave)).one().data == saved.model_dump(mode="json")
 
 
 def test_paid_excavation_and_client_clock(client: TestClient) -> None:
-    headers = account(client)
-    stored = open_world(client, headers)
+    params = player()
+    stored = open_world(client, params)
     saved = decode_save(stored.data)
-    data = saved.model_dump()
+    data = saved.model_dump(mode="json")
     data["savedAt"] = data["serverSavedAt"] = 999999999999999
     p = data["progress"]
     p["excavationSites"] = [{"id": "dig", "q": 0, "r": 0}]
@@ -118,18 +115,21 @@ def test_paid_excavation_and_client_clock(client: TestClient) -> None:
     ] = 3
     response = client.put(
         "/game/progress",
-        headers=headers,
+        params=params,
         json={
             "data": json.dumps(data),
             "expectedServerSavedAt": stored.serverSavedAt,
         },
     )
     assert response.status_code == 200
-    result = StoredSave.model_validate(response.json())
+    result = StoredSave.model_validate_json(response.text)
     assert stored.serverSavedAt < result.serverSavedAt < 999999999999999
-    loaded = decode_save(client.get("/game/progress", headers=headers).json()["data"])
+    loaded = decode_save(client.get("/game/progress", params=params).json()["data"])
     assert loaded.progress.activeExcavation is not None
-    assert loaded.progress.activeExcavation.model_dump() == p["activeExcavation"]
+    assert (
+        loaded.progress.activeExcavation.model_dump(mode="json")
+        == p["activeExcavation"]
+    )
     assert loaded.progress.collection[0].id == "item"
     assert (
         next(
@@ -142,50 +142,45 @@ def test_paid_excavation_and_client_clock(client: TestClient) -> None:
 def test_two_devices_choose_server_snapshot_and_do_not_merge(
     client: TestClient,
 ) -> None:
-    headers = account(client)
-    device2 = {
-        "Authorization": "Bearer "
-        + client.post(
-            "/auth/login",
-            json={
-                "email": "world@example.com",
-                "password": "a-long-world-test-password",
-            },
-        ).json()["access_token"]
-    }
-    original = open_world(client, headers)
-    first = action(
-        client, headers, original, {"type": "reveal", "position": {"q": 4, "r": 0}}
-    )
-    assert first.status_code == 200
-    second = action(
-        client, device2, original, {"type": "reveal", "position": {"q": -4, "r": 0}}
-    )
-    assert second.status_code == 409
-    assert second.json()["current"] == first.json()
-    assert client.get("/game/progress", headers=device2).json() == first.json()
+    params = player()
+    original = open_world(client, params)
+    with TestClient(client.app) as device2:
+        assert device2.get("/game/progress").status_code == 404
+        assert device2.get(
+            "/game/progress", params=params
+        ).json() == original.model_dump(mode="json")
+        first = action(
+            client, params, original, {"type": "reveal", "position": {"q": 4, "r": 0}}
+        )
+        assert first.status_code == 200
+        second = action(
+            device2, params, original, {"type": "reveal", "position": {"q": -4, "r": 0}}
+        )
+        assert second.status_code == 409
+        assert second.json()["current"] == first.json()
+        assert device2.get("/game/progress", params=params).json() == first.json()
 
 
 def test_concurrent_writes_are_atomic(client: TestClient) -> None:
-    headers = account(client)
-    saved = open_world(client, headers)
+    params = player()
+    saved = open_world(client, params)
 
     def write(_: int) -> int:
-        return action(client, headers, saved, {"type": "completeShift"}).status_code
+        return action(client, params, saved, {"type": "completeShift"}).status_code
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(write, range(2))) == [200, 409]
     assert (
         decode_save(
-            client.get("/game/progress", headers=headers).json()["data"]
+            client.get("/game/progress", params=params).json()["data"]
         ).progress.completedShifts
         == 1
     )
 
 
 def test_growth_uses_server_time_and_matures_on_login(client: TestClient) -> None:
-    headers = account(client)
-    saved = open_world(client, headers)
+    params = player()
+    saved = open_world(client, params)
     grass = next(
         c
         for c in decode_save(saved.data).progress.world.cells
@@ -193,7 +188,7 @@ def test_growth_uses_server_time_and_matures_on_login(client: TestClient) -> Non
     )
     response = action(
         client,
-        headers,
+        params,
         saved,
         {
             "type": "plantForest",
@@ -203,23 +198,20 @@ def test_growth_uses_server_time_and_matures_on_login(client: TestClient) -> Non
         },
     )
     assert response.status_code == 200
-    planted = StoredSave.model_validate(response.json())
+    planted = StoredSave.model_validate_json(response.text)
     p = decode_save(planted.data)
     assert p.progress.saplings[0].plantedAt < 99999999999999
     assert p.progress.saplings[0].growthDurationMs == get_settings().sapling_growth_ms
-    assert (
-        action(
-            client, headers, planted, {"type": "advanceGrowth", "now": 99999999999999}
-        ).json()
-        == planted.model_dump()
-    )
+    assert action(
+        client, params, planted, {"type": "advanceGrowth", "now": 99999999999999}
+    ).json() == planted.model_dump(mode="json")
     with Session(get_engine()) as db:
         row = db.scalars(select(WorldSave)).one()
-        data = p.model_dump()
+        data = p.model_dump(mode="json")
         data["progress"]["saplings"][0]["plantedAt"] = 0
         row.data = data
         db.commit()
-    restored = open_world(client, headers)
+    restored = open_world(client, params)
     grown = decode_save(restored.data).progress
     assert not grown.saplings
     assert next(c for c in grown.world.cells if c.key == grass.key).type == "forest"
@@ -227,62 +219,66 @@ def test_growth_uses_server_time_and_matures_on_login(client: TestClient) -> Non
 
 
 def test_corrupt_and_unknown_saves_do_not_overwrite(client: TestClient) -> None:
-    headers = account(client)
-    saved = open_world(client, headers)
+    params = player()
+    saved = open_world(client, params)
     for raw in ["broken", '{"schemaVersion":999}']:
         assert (
             client.put(
                 "/game/progress",
-                headers=headers,
+                params=params,
                 json={"data": raw, "expectedServerSavedAt": saved.serverSavedAt},
             ).status_code
             == 422
         )
-    assert client.get("/game/progress", headers=headers).json() == saved.model_dump()
+    assert client.get("/game/progress", params=params).json() == saved.model_dump(
+        mode="json"
+    )
     with Session(get_engine()) as db:
         row = db.scalars(select(WorldSave)).one()
         row.data = {"schemaVersion": 999}
         db.commit()
-    assert action(client, headers, saved, {"type": "completeShift"}).status_code == 422
+    assert action(client, params, saved, {"type": "completeShift"}).status_code == 422
     with Session(get_engine()) as db:
         assert db.scalars(select(WorldSave)).one().data == {"schemaVersion": 999}
 
 
 def test_import_migration_and_unknown_generator(client: TestClient) -> None:
-    headers = account(client)
-    p = new_progress("legacy").model_dump()
+    params = player()
+    p = new_progress("legacy").model_dump(mode="json")
     p["world"]["generatorVersion"] = 999
     response = client.post(
         "/game/session",
-        headers=headers,
+        params=params,
         json={"initialSave": json.dumps({"schemaVersion": 1, "savedAt": 100, **p})},
     )
     assert response.status_code == 200
-    imported = StoredSave.model_validate(response.json())
-    assert decode_save(imported.data).progress.model_dump() == p
+    imported = StoredSave.model_validate_json(response.text)
+    assert decode_save(imported.data).progress.model_dump(mode="json") == p
     assert (
         action(
-            client, headers, imported, {"type": "reveal", "position": {"q": 4, "r": 0}}
+            client, params, imported, {"type": "reveal", "position": {"q": 4, "r": 0}}
         ).status_code
         == 400
     )
-    assert client.get("/game/progress", headers=headers).json() == imported.model_dump()
+    assert client.get("/game/progress", params=params).json() == imported.model_dump(
+        mode="json"
+    )
 
 
 def test_invalid_input_and_save_limit(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    headers = account(client)
-    saved = open_world(client, headers)
+    params = player()
+    saved = open_world(client, params)
     assert (
         action(
-            client, headers, saved, {"type": "reveal", "position": {"q": 4.5, "r": 0}}
+            client, params, saved, {"type": "reveal", "position": {"q": 4.5, "r": 0}}
         ).status_code
         == 422
     )
     assert (
         action(
-            client, headers, saved, {"type": "reveal", "position": {"q": 999, "r": 0}}
+            client, params, saved, {"type": "reveal", "position": {"q": 999, "r": 0}}
         ).status_code
         == 400
     )
@@ -290,7 +286,7 @@ def test_invalid_input_and_save_limit(
     assert (
         client.put(
             "/game/progress",
-            headers=headers,
+            params=params,
             json={"data": saved.data, "expectedServerSavedAt": saved.serverSavedAt},
         ).status_code
         == 413
@@ -298,26 +294,80 @@ def test_invalid_input_and_save_limit(
 
 
 def test_noop_and_removing_opened_cells(client: TestClient) -> None:
-    headers = account(client)
-    saved = open_world(client, headers)
-    assert (
-        client.put(
-            "/game/progress",
-            headers=headers,
-            json={"data": saved.data, "expectedServerSavedAt": saved.serverSavedAt},
-        ).json()
-        == saved.model_dump()
-    )
+    params = player()
+    saved = open_world(client, params)
+    assert client.put(
+        "/game/progress",
+        params=params,
+        json={"data": saved.data, "expectedServerSavedAt": saved.serverSavedAt},
+    ).json() == saved.model_dump(mode="json")
     changed = decode_save(saved.data)
     changed.progress.world.cells.pop()
     assert (
         client.put(
             "/game/progress",
-            headers=headers,
+            params=params,
             json={
                 "data": encode_save(changed),
                 "expectedServerSavedAt": saved.serverSavedAt,
             },
         ).status_code
         == 400
+    )
+
+
+def test_cookie_session_works_without_registration_or_jwt(client: TestClient) -> None:
+    response = client.post("/game/session", json={"seed": "anonymous"})
+    assert response.status_code == 200
+    saved = StoredSave.model_validate_json(response.text)
+    assert "game_player_id=" in response.headers["set-cookie"]
+    assert "HttpOnly" in response.headers["set-cookie"]
+    assert client.get("/game/progress").json() == saved.model_dump(mode="json")
+    assert (
+        client.get(
+            "/game/progress", headers={"Authorization": "Bearer invalid"}
+        ).status_code
+        == 200
+    )
+    with Session(get_engine()) as db:
+        row = db.get(WorldSave, saved.playerId)
+        assert row is not None and row.user_id is None
+    with TestClient(client.app) as second:
+        other = StoredSave.model_validate_json(
+            second.post("/game/session", json={}).text
+        )
+        assert other.playerId != saved.playerId
+        assert client.get(
+            "/game/progress", params={"player_id": str(other.playerId)}
+        ).json() == other.model_dump(mode="json")
+    updated = client.post(
+        "/game/actions",
+        json={
+            "action": {"type": "completeShift"},
+            "expectedServerSavedAt": saved.serverSavedAt,
+        },
+    )
+    assert updated.status_code == 200
+    assert (
+        client.put(
+            "/game/progress",
+            json={
+                "data": updated.json()["data"],
+                "expectedServerSavedAt": updated.json()["serverSavedAt"],
+            },
+        ).status_code
+        == 200
+    )
+
+
+def test_game_openapi_has_no_security_requirement(client: TestClient) -> None:
+    paths = client.get("/openapi.json").json()["paths"]
+    for path, methods in paths.items():
+        if path.startswith("/game/"):
+            for operation in methods.values():
+                assert not operation.get("security")
+    assert paths["/me"]["get"]["security"]
+    assert client.get("/me").status_code == 401
+    assert (
+        client.get("/game/progress", params={"player_id": "invalid"}).status_code == 422
     )
