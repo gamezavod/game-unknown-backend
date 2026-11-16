@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.world.generator import (
+    disk,
     generate_cell,
     generate_world,
     neighbors,
@@ -20,6 +21,27 @@ def test_1000_valid_seeds_and_farm_preference() -> None:
         assert len(world.cells) == 37
         assert sum(c.type != "water" for c in world.cells) == 25
         by_key = {c.key: c for c in world.cells}
+        assert set(by_key) == set(disk(3))
+        assert all(c.state == "visible" and c.type != "river" for c in world.cells)
+        assert sum(c.type == "forest" for c in world.cells) >= 4
+        assert sum(c.type == "rock" for c in world.cells) >= 2
+        assert sum(c.type == "coast" for c in world.cells) >= 3
+        buildings = {c.building: c for c in world.cells if c.building}
+        assert set(buildings) == {"townHall", "home", "lumbermill", "farm", "warehouse"}
+        assert all(
+            c.type == "grass" and c.buildingLevel == 1 for c in buildings.values()
+        )
+        assert buildings["townHall"].key == (0, 0)
+        assert buildings["home"].key in neighbors((0, 0))
+        assert buildings["warehouse"].key in neighbors((0, 0))
+        assert (
+            sum(
+                by_key[p].type == "forest"
+                for p in neighbors(buildings["lumbermill"].key)
+                if p in by_key
+            )
+            >= 2
+        )
         farm = next(c for c in world.cells if c.building == "farm")
         water_sites = [
             c
@@ -132,3 +154,17 @@ def test_paid_excavation_roundtrip() -> None:
     assert decode_save(encode_save(save)) == save
     assert save.progress.activeExcavation is not None
     assert save.progress.activeExcavation.paid
+
+
+def test_lazy_generation_is_order_independent_and_fog_is_implicit() -> None:
+    world = generate_world("lazy")
+    assert set(c.key for c in world.cells) == set(disk(3))
+    first, second = (4, 0), (4, -1)
+    a = world.model_copy(deep=True)
+    b = world.model_copy(deep=True)
+    a.cells.append(generate_cell(a, first))
+    a.cells.append(generate_cell(a, second))
+    b.cells.append(generate_cell(b, second))
+    b.cells.append(generate_cell(b, first))
+    assert {c.key: c for c in a.cells} == {c.key: c for c in b.cells}
+    assert len(world.cells) == 37

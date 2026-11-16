@@ -150,9 +150,12 @@ monitoring, TLS termination and secret management before public deployment.
 
 ## World generation and progress
 
-Authenticated world generation and versioned PostgreSQL saves are available under
-`/game/session`, `/game/progress` and `/game/actions`. They reuse the existing JWT,
-SQLAlchemy and Alembic architecture. Apply `002_world_progress` before starting.
+Public guest world generation and versioned PostgreSQL saves are available under
+`/game/session`, `/game/progress` and `/game/actions`. They reuse the existing
+SQLAlchemy and Alembic architecture. Apply migrations through `003_guest_worlds`
+before starting. Game routes temporarily require no JWT: `/game/session` returns
+a `playerId` and remembers it in a cookie; `?player_id=<UUID>` selects a world
+explicitly. Existing `/auth/*` and `/me` behavior is unchanged.
 No dependencies or frontend files were changed. The API contract, generation
 assumptions, save format and client integration boundaries are documented in
 [docs/world-and-saves.md](docs/world-and-saves.md).
