@@ -4,6 +4,8 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
+from app.match3.routes import router as match3_router
+from app.match3.service import Match3Error
 from app.routes import router
 from app.services import AuthError
 from app.world.routes import router as world_router
@@ -15,6 +17,13 @@ def create_app() -> FastAPI:
     app = FastAPI(title="GameZavod API")
     app.include_router(router)
     app.include_router(world_router)
+    app.include_router(match3_router)
+
+    @app.exception_handler(Match3Error)
+    async def match3_error(request: Request, exc: Match3Error) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status, content={"detail": exc.detail, "code": exc.code}
+        )
 
     @app.exception_handler(WorldError)
     async def world_error(request: Request, exc: WorldError) -> JSONResponse:

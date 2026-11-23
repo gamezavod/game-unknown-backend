@@ -116,8 +116,23 @@ class GameProgress(Model):
             {s.key for s in self.excavationSites}
         ) != len(self.excavationSites):
             raise ValueError("Повтор участков раскопок")
-        if any(site.key not in cells for site in self.excavationSites):
-            raise ValueError("Раскопка вне открытой карты")
+        for site in self.excavationSites:
+            if site.key in cells:
+                continue
+            selected = self.activeExcavation
+            adjacent = any(
+                max(
+                    abs(site.q - c.q),
+                    abs(site.r - c.r),
+                    abs(site.q + site.r - c.q - c.r),
+                )
+                == 1
+                for c in self.world.cells
+            )
+            if selected is None or selected.siteId != site.id or not adjacent:
+                raise ValueError(
+                    "Неоткрытый участок не является текущей соседней раскопкой"
+                )
         if self.activeExcavation and self.activeExcavation.siteId not in sites:
             raise ValueError("Неизвестный участок текущей раскопки")
         if len({item.id for item in self.collection}) != len(self.collection):
