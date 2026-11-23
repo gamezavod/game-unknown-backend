@@ -159,3 +159,12 @@ explicitly. Existing `/auth/*` and `/me` behavior is unchanged.
 No dependencies or frontend files were changed. The API contract, generation
 assumptions, save format and client integration boundaries are documented in
 [docs/world-and-saves.md](docs/world-and-saves.md).
+
+## Match-3 shifts
+
+The six public endpoints under `/game/match3` manage server-owned 8×8 boards,
+resource goals, cascades, hints, lightning and excavation progress. Apply migration
+`004_match3`. Inventory, active runs and retry receipts are persisted together
+with world updates. Existing prototype defaults are preserved; no new dependencies
+or frontend changes are included. Request/response examples, idempotency,
+concurrency and concept/prototype boundaries: [docs/match3-api.md](docs/match3-api.md).
