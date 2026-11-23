@@ -100,6 +100,10 @@ class Match3Service:
             run = Run.model_validate_json(json.dumps(row.data))
             if row.status != run.status or run.result and run.result.runId != row.id:
                 raise ValueError("Несогласованная смена")
+            canonical = run.model_dump(mode="json")
+            if row.data != canonical:
+                # Совместимость фишек не расходует ход и не меняет RNG/revision.
+                row.data = canonical
             return row, run
         except (ValidationError, ValueError) as error:
             raise Match3Error(
@@ -302,6 +306,9 @@ class Match3Service:
             raise Match3Error(
                 422, "receipt_corrupt", "Сохранённый ответ поврежден"
             ) from error
+        canonical = result.model_dump(mode="json")
+        if receipt.response != canonical:
+            receipt.response = canonical
         self.repo.db.commit()
         return result
 

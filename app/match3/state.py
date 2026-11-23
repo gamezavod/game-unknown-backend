@@ -1,36 +1,45 @@
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import BeforeValidator, ConfigDict, Field, model_validator
 
 from app.world.state import CollectionItem, Model, Natural, Position, Timestamp
 
 ShiftId = Literal["sawmill", "farm", "quarry", "mine", "dig"]
 ResourceId = Literal["wood", "food", "stone", "iron"]
-ChipId = Literal[
-    "log",
-    "tree",
-    "leaf",
-    "acorn",
-    "mushroom",
-    "wheat",
-    "carrot",
-    "apple",
-    "sunflower",
-    "pumpkin",
-    "rock",
-    "sand",
-    "brick",
-    "crystal",
-    "clay",
-    "ore",
-    "gem",
-    "lantern",
-    "pickaxe",
-    "gear",
-    "digRock",
-    "sprout",
-    "autumn",
+
+
+def canonical_chip(value: object) -> object:
+    """Старые партии и receipts читаются без второго визуального типа камня."""
+    return "rock" if value == "digRock" else value
+
+
+ChipId = Annotated[
+    Literal[
+        "log",
+        "tree",
+        "leaf",
+        "acorn",
+        "mushroom",
+        "wheat",
+        "carrot",
+        "apple",
+        "sunflower",
+        "pumpkin",
+        "rock",
+        "sand",
+        "brick",
+        "crystal",
+        "clay",
+        "ore",
+        "gem",
+        "lantern",
+        "pickaxe",
+        "gear",
+        "sprout",
+        "autumn",
+    ],
+    BeforeValidator(canonical_chip),
 ]
 Board = list[list[ChipId]]
 
@@ -68,6 +77,14 @@ class Rules(Model):
     moves: Annotated[int, Field(gt=0)]
     charges: Natural
     requiredWorkers: Natural
+
+    @model_validator(mode="after")
+    def unique_dig_chips(self) -> Self:
+        if self.shiftId == "dig":
+            # В старых snapshots были и rock, и digRock. После приведения
+            # оставляем один элемент, чтобы камень не выпадал с двойным весом.
+            self.chips = list(dict.fromkeys(self.chips))
+        return self
 
 
 class Reason(Model):
