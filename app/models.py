@@ -6,8 +6,10 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -57,3 +59,45 @@ class WorldSave(Base):
     )
     data: Mapped[dict[str, object]] = mapped_column(JSONB)
     server_saved_at: Mapped[int] = mapped_column(BigInteger)
+
+
+class Match3ProfileRow(Base):
+    __tablename__ = "match3_profiles"
+
+    player_id: Mapped[UUID] = mapped_column(
+        ForeignKey("world_saves.player_id", ondelete="CASCADE"), primary_key=True
+    )
+    data: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class Match3RunRow(Base):
+    __tablename__ = "match3_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'finished')", name="ck_match3_run_status"
+        ),
+        Index(
+            "uq_match3_active_player",
+            "player_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    player_id: Mapped[UUID] = mapped_column(
+        ForeignKey("world_saves.player_id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(16))
+    data: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class Match3ReceiptRow(Base):
+    __tablename__ = "match3_receipts"
+
+    player_id: Mapped[UUID] = mapped_column(
+        ForeignKey("world_saves.player_id", ondelete="CASCADE"), primary_key=True
+    )
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    response: Mapped[dict[str, object]] = mapped_column(JSONB)

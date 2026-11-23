@@ -1,9 +1,10 @@
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
+from sqlalchemy import select
 
 from app.config import Settings
-from app.models import WorldSave
+from app.models import Match3RunRow, WorldSave
 from app.world.progress import advance_growth, apply_action, new_progress
 from app.world.repository import WorldRepository
 from app.world.schemas import ActionRequest, OpenWorld, SaveRequest, StoredSave
@@ -148,6 +149,24 @@ class WorldService:
         incoming = self.decode(body.data)
         row, save = self.locked(player_id)
         self.check_stamp(save, body.expectedServerSavedAt, player_id)
+        active_dig = self.repo.db.scalar(
+            select(Match3RunRow.id).where(
+                Match3RunRow.player_id == player_id,
+                Match3RunRow.status == "active",
+                Match3RunRow.data["rules"]["shiftId"].as_string() == "dig",
+            )
+        )
+        if active_dig is not None and (
+            incoming.progress.activeExcavation != save.progress.activeExcavation
+            or {s.id: s for s in incoming.progress.excavationSites}
+            != {s.id: s for s in save.progress.excavationSites}
+            or {item.id: item for item in incoming.progress.collection}
+            != {item.id: item for item in save.progress.collection}
+        ):
+            self.repo.rollback()
+            raise WorldError(
+                409, "Активная раскопка изменяется только через match3 API"
+            )
         if (
             incoming.progress.world.seed != save.progress.world.seed
             or incoming.progress.world.generatorVersion
