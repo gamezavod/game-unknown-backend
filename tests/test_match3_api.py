@@ -473,7 +473,7 @@ def dig_board() -> list[list[Any]]:
     from test_match3_engine import stable_board
 
     equivalents = {
-        "log": "digRock",
+        "log": "rock",
         "tree": "brick",
         "leaf": "sprout",
         "acorn": "autumn",
@@ -527,7 +527,7 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     def prepare(value: Run) -> None:
         value.digDepth = 5
         value.board = dig_board()
-        value.board[7][1] = value.board[7][2] = value.board[7][4] = "digRock"
+        value.board[7][1] = value.board[7][2] = value.board[7][4] = "rock"
         value.board[7][3] = "brick"
 
     patch_run(resumed["runId"], prepare)
@@ -592,7 +592,7 @@ def test_dig_expiry_saves_depth_and_invalid_target_is_rejected(
     def prepare(value: Run) -> None:
         value.movesLeft, value.digDepth, value.rngState = 1, 5, 17
         value.board = dig_board()
-        value.board[0][0] = value.board[0][1] = value.board[1][2] = "digRock"
+        value.board[0][0] = value.board[0][1] = value.board[1][2] = "rock"
 
     patch_run(run["runId"], prepare)
     response = client.post(
@@ -691,3 +691,106 @@ def test_general_snapshot_cannot_erase_active_excavation(client: TestClient) -> 
     assert response.status_code == 409
     assert client.get("/game/progress", params=params).json() == original
     assert client.get(PREFIX + "/state", params=params).json()["activeRun"] == run
+
+
+def test_legacy_dig_load_normalizes_stones_and_can_play_mixed_match(
+    client: TestClient,
+) -> None:
+    params = player(client)
+    run = start(client, params, "dig")
+    with Session(get_engine()) as db:
+        row = db.get(Match3RunRow, UUID(run["runId"]))
+        assert row is not None
+        raw: dict[str, Any] = json.loads(json.dumps(row.data))
+        raw["rules"]["mainChip"] = "digRock"
+        raw["rules"]["chips"] = ["digRock", "brick", "sprout", "autumn", "rock"]
+        chips = ["rock", "brick", "sprout", "autumn"]
+        raw["board"] = [[chips[(r + c) % 4] for c in range(8)] for r in range(8)]
+        raw["board"][0][:3] = ["rock", "digRock", "brick"]
+        raw["board"][1][2] = "rock"
+        row.data = raw
+        db.commit()
+
+    response = client.get(PREFIX + "/state", params=params)
+    assert response.status_code == 200
+    current = response.json()["activeRun"]
+    assert current["board"][0][:3] == ["rock", "rock", "brick"]
+    assert "digRock" not in response.text
+    for field in (
+        "runId",
+        "movesLeft",
+        "chargesLeft",
+        "digDepth",
+        "revision",
+        "amphora",
+    ):
+        assert current[field] == run[field]
+    assert current["serverSavedAt"] == run["serverSavedAt"]
+    with Session(get_engine()) as db:
+        row = db.get(Match3RunRow, UUID(run["runId"]))
+        assert row is not None
+        assert "digRock" not in json.dumps(row.data)
+        rules = row.data["rules"]
+        assert isinstance(rules, dict) and rules["chips"] == chips
+        assert row.data["rngState"] == raw["rngState"]
+
+    moved = client.post(
+        f"{PREFIX}/runs/{run['runId']}/moves",
+        params=params,
+        json={
+            "from": {"row": 1, "column": 2},
+            "to": {"row": 0, "column": 2},
+            "expectedRevision": current["revision"],
+        },
+    )
+    assert moved.status_code == 200, moved.text
+    result = moved.json()
+    assert result["accepted"] and result["movesLeft"] == run["movesLeft"] - 1
+    assert {(0, 0), (0, 1), (0, 2)} <= {
+        (p["row"], p["column"]) for p in result["steps"][0]["cleared"]
+    }
+    assert "digRock" not in moved.text
+
+
+@pytest.mark.parametrize("operation", ["start", "move"])
+def test_legacy_idempotency_response_normalizes_all_board_frames(
+    client: TestClient, operation: str
+) -> None:
+    params = player(client)
+    key = "legacy-response"
+    run = start(client, params, "dig", key=key if operation == "start" else None)
+    url = PREFIX + "/runs"
+    body = {"shiftId": "dig"}
+    original = run
+    if operation == "move":
+        hint = client.get(f"{url}/{run['runId']}/hint", params=params).json()
+        url += f"/{run['runId']}/moves"
+        body = {
+            "from": hint["from"],
+            "to": hint["to"],
+            "expectedRevision": hint["revision"],
+        }
+        response = client.post(
+            url, params=params, json=body, headers={"Idempotency-Key": key}
+        )
+        assert response.status_code == 200
+        original = response.json()
+        assert original["steps"]
+
+    with Session(get_engine()) as db:
+        receipt = db.get(Match3ReceiptRow, (UUID(params["player_id"]), key))
+        assert receipt is not None
+        encoded = json.dumps(receipt.response)
+        assert '"rock"' in encoded
+        receipt.response = json.loads(encoded.replace('"rock"', '"digRock"'))
+        db.commit()
+
+    replay = client.post(
+        url, params=params, json=body, headers={"Idempotency-Key": key}
+    )
+    assert replay.status_code == (201 if operation == "start" else 200)
+    assert replay.json() == original
+    assert "digRock" not in replay.text
+    with Session(get_engine()) as db:
+        receipt = db.get(Match3ReceiptRow, (UUID(params["player_id"]), key))
+        assert receipt is not None and receipt.response == original

@@ -51,6 +51,48 @@ def test_all_themes_generate_stable_playable_boards() -> None:
             assert all(c in RULES[shift].chips for row in run.board for c in row)
 
 
+@pytest.mark.parametrize("vertical", [False, True])
+def test_legacy_mixed_stones_load_as_one_matching_chip(vertical: bool) -> None:
+    original = make_run("dig")
+    original.digDepth, original.movesLeft, original.revision = 3, 7, 4
+    raw = original.model_dump()
+    raw["rules"]["mainChip"] = "digRock"
+    raw["rules"]["chips"] = ["digRock", "brick", "sprout", "autumn", "rock"]
+    positions = [(i, 0) if vertical else (0, i) for i in range(3)]
+    for (row, column), chip in zip(positions, ["rock", "digRock", "rock"], strict=True):
+        raw["board"][row][column] = chip
+
+    loaded = Run.model_validate(raw)
+    assert loaded.rules.mainChip == "rock"
+    assert loaded.rules.chips == ["rock", "brick", "sprout", "autumn"]
+    assert set(positions) <= {
+        p.key for p in engine.matches(loaded.board, loaded.amphora)
+    }
+    assert "digRock" not in loaded.model_dump_json()
+    for field in (
+        "rngState",
+        "movesLeft",
+        "chargesLeft",
+        "digDepth",
+        "siteId",
+        "revision",
+    ):
+        assert getattr(loaded, field) == getattr(original, field)
+    # Чтение совместимого формата не исправляет входной объект на месте.
+    assert raw["board"][positions[1][0]][positions[1][1]] == "digRock"
+
+
+def test_dig_generation_and_refill_use_four_unique_chips() -> None:
+    assert RULES["dig"].chips == ["rock", "brick", "sprout", "autumn"]
+    run = make_run("dig")
+    rng = engine.RandomStream(101)
+    for _ in range(20):
+        engine.clear_step(
+            run, [CellPosition(row=7, column=c) for c in range(8)], rng.next
+        )
+        assert "digRock" not in run.model_dump_json()
+
+
 def test_matches_merge_crossings_and_ignore_amphora() -> None:
     board = stable_board()
     board[0][0] = board[0][1] = board[0][2] = "log"
