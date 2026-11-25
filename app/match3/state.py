@@ -246,12 +246,23 @@ class HintResponse(Model):
     to: CellPosition | None
 
 
+class MoveBreakdown(Model):
+    base: Natural
+    forest: Natural = 0
+    happiness: Natural = 0
+
+    @property
+    def total(self) -> int:
+        return self.base + self.forest + self.happiness
+
+
 class ShiftView(Model):
     shiftId: ShiftId
     title: str
     resourceId: ResourceId | None
     goal: Goal
     moves: int
+    moveBreakdown: MoveBreakdown
     charges: int
     requiredWorkers: int
     assignedWorkers: int
