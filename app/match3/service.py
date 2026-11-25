@@ -19,6 +19,7 @@ from app.match3.state import (
     Goal,
     HintResponse,
     LightningResponse,
+    MoveBreakdown,
     MoveRequest,
     MoveResponse,
     Profile,
@@ -208,16 +209,25 @@ class Match3Service:
         return bool(progress.activeExcavation or Match3Service.frontier(progress))
 
     @staticmethod
-    def configured_rules(profile: Profile, shift_id: ShiftId) -> Rules:
+    def configured_rules(
+        profile: Profile, shift_id: ShiftId
+    ) -> tuple[Rules, MoveBreakdown]:
         rules = RULES[shift_id].model_copy(deep=True)
-        if rules.resourceId:
-            workers = profile.workers.get(shift_id, 0)
-            rules.moves = 10 + 5 * workers + profile.happinessMoves if workers else 0
-            if shift_id == "sawmill" and workers:
-                rules.moves += profile.forestMoves
+        workers = profile.workers.get(shift_id, 0)
+        if rules.resourceId is None:
+            moves = MoveBreakdown(base=rules.moves)
+        elif workers:
+            moves = MoveBreakdown(
+                base=10 + 5 * workers,
+                forest=profile.forestMoves if shift_id == "sawmill" else 0,
+                happiness=profile.happinessMoves,
+            )
+        else:
+            moves = MoveBreakdown(base=0)
+        rules.moves = moves.total
         if not profile.energy.get(shift_id, False):
             rules.charges = 0
-        return rules
+        return rules, moves
 
     def state(self, player: UUID) -> StateResponse:
         ctx = self.context(player)
@@ -225,7 +235,7 @@ class Match3Service:
         active = self.read_run(player, active_row.id)[1] if active_row else None
         shifts = []
         for shift_id in RULES:
-            rules = self.configured_rules(ctx.profile, shift_id)
+            rules, move_breakdown = self.configured_rules(ctx.profile, shift_id)
             reasons = self.reasons(ctx, rules, active_row)
             shifts.append(
                 ShiftView(
@@ -234,6 +244,7 @@ class Match3Service:
                     resourceId=rules.resourceId,
                     goal=self.goal(rules),
                     moves=rules.moves,
+                    moveBreakdown=move_breakdown,
                     charges=rules.charges
                     if ctx.profile.energy.get(rules.shiftId, False)
                     else 0,
@@ -404,7 +415,7 @@ class Match3Service:
         if cached:
             assert isinstance(cached, RunView)
             return cached
-        rules = self.configured_rules(ctx.profile, shift_id)
+        rules, _ = self.configured_rules(ctx.profile, shift_id)
         reasons = self.reasons(ctx, rules, self.repo.active(player))
         if reasons:
             raise Match3Error(409, reasons[0].code, reasons[0].message)

@@ -110,6 +110,13 @@ def test_state_and_all_six_routes_are_public(client: TestClient) -> None:
     assert [
         shifts[s]["moves"] for s in ("sawmill", "farm", "quarry", "mine", "dig")
     ] == [24, 22, 22, 17, 20]
+    assert {s: shift["moveBreakdown"] for s, shift in shifts.items()} == {
+        "sawmill": {"base": 20, "forest": 2, "happiness": 2},
+        "farm": {"base": 20, "forest": 0, "happiness": 2},
+        "quarry": {"base": 20, "forest": 0, "happiness": 2},
+        "mine": {"base": 15, "forest": 0, "happiness": 2},
+        "dig": {"base": 20, "forest": 0, "happiness": 0},
+    }
     assert all(shift["available"] for shift in shifts.values())
     assert state["activeRun"] is None and state["lastResult"] is None
     paths = client.get("/openapi.json").json()["paths"]
@@ -302,6 +309,8 @@ def test_unavailable_workers_energy_and_concept_move_formula(
     state = client.get(PREFIX + "/state", params=params).json()
     sawmill = next(shift for shift in state["shifts"] if shift["shiftId"] == "sawmill")
     assert not sawmill["available"] and sawmill["reasons"][0]["code"] == "no_workers"
+    assert sawmill["moves"] == 0
+    assert sawmill["moveBreakdown"] == {"base": 0, "forest": 0, "happiness": 0}
     assert (
         client.post(
             PREFIX + "/runs", params=params, json={"shiftId": "sawmill"}
@@ -317,8 +326,16 @@ def test_unavailable_workers_energy_and_concept_move_formula(
     patch_profile(params, configure)
     for workers, expected in [(1, 15), (2, 20), (3, 25)]:
         patch_profile(params, assign_workers(workers))
+        state = client.get(PREFIX + "/state", params=params).json()
+        sawmill = next(s for s in state["shifts"] if s["shiftId"] == "sawmill")
+        assert sawmill["moveBreakdown"] == {
+            "base": expected,
+            "forest": 0,
+            "happiness": 0,
+        }
         run = start(client, params)
-        assert run["movesLeft"] == expected and run["chargesLeft"] == 0
+        assert run["movesLeft"] == sawmill["moves"] == expected
+        assert run["chargesLeft"] == 0
         denied = client.post(
             f"{PREFIX}/runs/{run['runId']}/lightning", params=params, json={"row": 0}
         )

@@ -53,7 +53,8 @@ curl -b cookies.txt http://localhost:8000/game/match3/state
     {
       "shiftId":"sawmill","title":"Лесопилка","resourceId":"wood",
       "goal":{"type":"collect","chipId":"log","target":30,"progress":0,"bonus":10,"targetDepth":null},
-      "moves":24,"charges":1,"requiredWorkers":1,"assignedWorkers":2,
+      "moves":24,"moveBreakdown":{"base":20,"forest":2,"happiness":2},
+      "charges":1,"requiredWorkers":1,"assignedWorkers":2,
       "available":true,"reasons":[]
     }
   ],
@@ -63,6 +64,8 @@ curl -b cookies.txt http://localhost:8000/game/match3/state
 ```
 
 `shifts` всегда содержит все пять смен (в примере показана одна). `reasons` — массив `{code,message}`: `active_run`, `warehouse_full`, `no_workers`, `no_excavation_site`, `unsupported_generator`. Нехватка энергии не запрещает обычную партию, а отключает молнию. При активной смене вместо создания новой надо восстановить `activeRun`.
+
+`moveBreakdown` содержит базовые ходы (`base`) и фактически начисленные бонусы за лес (`forest`) и счастье (`happiness`). `moves` равняется сумме этих трёх полей. У ресурсной смены без работников все три значения равны 0. У раскопок все ходы базовые.
 
 Для незавершённой раскопки `excavation` содержит `siteId`, позицию участка `q/r`, тип его местности для предварительного просмотра, `depth`, `targetDepth:6`, `paid`. `lastResult` — итог последней завершённой смены. Его остаток склада зафиксирован на момент начисления; верхний `warehouse` отражает текущие запасы.
 
