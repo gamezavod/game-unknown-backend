@@ -205,6 +205,7 @@ def test_dead_board_reshuffle_is_in_animation_steps() -> None:
     chips = run.rules.chips
     run.board = [[chips[(row + column) % 5] for column in range(8)] for row in range(8)]
     assert not engine.matches(run.board) and not engine.possible_moves(run.board)
+    assert run.rngState is not None
     rng = engine.RandomStream(run.rngState)
     steps: list[CascadeStep] = []
     engine.settle(run, rng.next, steps)

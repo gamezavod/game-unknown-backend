@@ -9,6 +9,7 @@ from app.db import get_db
 from app.match3.repository import Match3Repository
 from app.match3.service import Match3Service
 from app.match3.state import (
+    ClientResultRequest,
     FinishRequest,
     FinishResponse,
     HintResponse,
@@ -16,6 +17,7 @@ from app.match3.state import (
     LightningResponse,
     MoveRequest,
     MoveResponse,
+    PauseRequest,
     RunView,
     StartRequest,
     StateResponse,
@@ -41,6 +43,18 @@ Key = Annotated[
 @router.get("/state", response_model=StateResponse)
 def state(player: Player, service: Service) -> StateResponse:
     return service.state(player)
+
+
+@router.post("/pause", response_model=RunView)
+def pause(body: PauseRequest, player: Player, service: Service) -> RunView:
+    return service.pause_client_run(player, body)
+
+
+@router.post("/results", response_model=FinishResponse)
+def save_result(
+    body: ClientResultRequest, player: Player, service: Service
+) -> FinishResponse:
+    return service.save_client_result(player, body)
 
 
 @router.post("/runs", response_model=RunView, status_code=201)

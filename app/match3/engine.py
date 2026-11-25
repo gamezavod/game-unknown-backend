@@ -199,6 +199,7 @@ def move(original: Run, a: CellPosition, b: CellPosition) -> Move:
         return Move(run, False, swapped, [], "no_match")
     run.board = swapped
     run.movesLeft -= 1
+    assert run.rngState is not None
     stream = RandomStream(run.rngState)
     steps: list[CascadeStep] = []
     settle(run, stream.next, steps)
@@ -216,6 +217,7 @@ def lightning(
         if not run.amphora or run.amphora.key != (row, c)
     ]
     run.chargesLeft -= 1
+    assert run.rngState is not None
     stream = RandomStream(run.rngState)
     steps = [clear_step(run, cleared, stream.next, "lightning")]
     settle(run, stream.next, steps)

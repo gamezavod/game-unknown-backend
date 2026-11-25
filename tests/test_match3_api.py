@@ -12,8 +12,11 @@ from sqlalchemy.orm import Session
 from test_match3_engine import winning_setup
 
 from app.db import get_engine
-from app.match3.state import Profile, Run, ShiftId
+from app.match3 import engine
+from app.match3.config import RULES
+from app.match3.state import CellPosition, Profile, Run, ShiftId
 from app.models import Match3ProfileRow, Match3ReceiptRow, Match3RunRow
+from app.world.generator import island_layout, neighbors
 from app.world.state import decode_save
 
 PREFIX = "/game/match3"
@@ -95,7 +98,7 @@ def assign_workers(count: int) -> Callable[[Profile], None]:
     return apply
 
 
-def test_state_and_all_six_routes_are_public(client: TestClient) -> None:
+def test_match3_routes_are_public(client: TestClient) -> None:
     assert client.get(PREFIX + "/state").status_code == 404
     client.post("/game/session", json={})
     state = client.get(PREFIX + "/state").json()
@@ -126,7 +129,7 @@ def test_state_and_all_six_routes_are_public(client: TestClient) -> None:
         if path.startswith(PREFIX)
         for operation in methods.values()
     ]
-    assert len(operations) == 6
+    assert len(operations) == 8
     assert all(not operation.get("security") for operation in operations)
     assert client.get("/me").status_code == 401
 
@@ -503,10 +506,14 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     client: TestClient,
 ) -> None:
     params = player(client)
+    original = client.get("/game/progress", params=params).json()
+    first = original["fogPreview"][0]
+    target = {"q": first["q"], "r": first["r"]}
+    site_id = f"dig:{target['q']}:{target['r']}"
     response = client.post(
         PREFIX + "/runs",
         params=params,
-        json={"shiftId": "dig", "target": {"q": 4, "r": 0}},
+        json={"shiftId": "dig", "target": target},
     )
     assert response.status_code == 201, response.text
     run = response.json()
@@ -516,8 +523,8 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     assert result.json()["dig"]["savedDepth"] == 3
     state = client.get(PREFIX + "/state", params=params).json()
     assert state["excavation"] == {
-        "siteId": "dig:4:0",
-        "position": {"q": 4, "r": 0},
+        "siteId": site_id,
+        "position": target,
         "terrain": state["excavation"]["terrain"],
         "depth": 3,
         "targetDepth": 6,
@@ -525,7 +532,7 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     }
     assert state["warehouse"]["food"]["amount"] == 80
     saved = decode_save(client.get("/game/progress", params=params).json()["data"])
-    assert len(saved.progress.world.cells) == 37
+    assert len(saved.progress.world.cells) == 25
     assert (
         saved.progress.activeExcavation is not None
         and saved.progress.activeExcavation.paid
@@ -556,11 +563,13 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     assert found.status_code == 200, found.text
     assert found.json()["status"] == "finished"
     discovery = found.json()["result"]["dig"]
-    assert discovery["finding"]["siteId"] == "dig:4:0"
-    assert discovery["revealedCell"] == {"q": 4, "r": 0}
+    assert discovery["finding"]["siteId"] == site_id
+    assert discovery["revealedCell"] == target
     world = decode_save(client.get("/game/progress", params=params).json()["data"])
-    assert len(world.progress.world.cells) == 38
-    assert (4, 0) in {cell.key for cell in world.progress.world.cells}
+    assert len(world.progress.world.cells) == 26
+    assert (target["q"], target["r"]) in {
+        cell.key for cell in world.progress.world.cells
+    }
     assert (
         world.progress.activeExcavation is None and len(world.progress.collection) == 1
     )
@@ -572,7 +581,7 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     )
     unchanged = decode_save(client.get("/game/progress", params=params).json()["data"])
     assert (
-        len(unchanged.progress.world.cells) == 38
+        len(unchanged.progress.world.cells) == 26
         and len(unchanged.progress.collection) == 1
     )
     assert (
@@ -811,3 +820,233 @@ def test_legacy_idempotency_response_normalizes_all_board_frames(
     with Session(get_engine()) as db:
         receipt = db.get(Match3ReceiptRow, (UUID(params["player_id"]), key))
         assert receipt is not None and receipt.response == original
+
+
+def test_client_result_is_idempotent_and_does_not_store_a_board(
+    client: TestClient,
+) -> None:
+    params = player(client)
+    endpoint = PREFIX + "/results"
+    run_id = uuid4()
+    payload = {
+        "runId": run_id.hex,
+        "shiftId": "sawmill",
+        "movesLeft": 18,
+        "chargesLeft": 1,
+        "collected": 32,
+    }
+    response = client.post(endpoint, params=params, json=payload)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert (result["bonus"], result["credited"]) == (10, 42)
+    assert result["warehouse"]["wood"]["amount"] == 162
+    assert client.post(endpoint, params=params, json=payload).json() == result
+    conflict = client.post(endpoint, params=params, json={**payload, "collected": 34})
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "idempotency_conflict"
+    snapshot = decode_save(client.get("/game/progress", params=params).json()["data"])
+    assert snapshot.progress.completedShifts == 1
+    with Session(get_engine()) as db:
+        assert db.get(Match3RunRow, run_id) is None
+
+
+def test_client_dig_preserves_depth_and_opens_random_allowed_cell(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    params = player(client)
+    endpoint = PREFIX + "/results"
+    initial = decode_save(client.get("/game/progress", params=params).json()["data"])
+    known = {cell.key for cell in initial.progress.world.cells}
+    island = island_layout(initial.progress.world.seed)
+    eligible = {
+        p
+        for cell in known
+        for p in neighbors(cell)
+        if p not in known and island.contains(p)
+    }
+    chosen = sorted(eligible)[-1]
+    draws: list[set[tuple[int, int]]] = []
+
+    def choose(candidates: list[tuple[int, int]]) -> tuple[int, int]:
+        draws.append(set(candidates))
+        return chosen
+
+    monkeypatch.setattr("app.match3.service.secrets.choice", choose)
+    partial = client.post(
+        endpoint,
+        params=params,
+        json={
+            "runId": uuid4().hex,
+            "shiftId": "dig",
+            "movesLeft": 0,
+            "chargesLeft": 0,
+            "collected": 0,
+            "digDepth": 2,
+        },
+    )
+    assert partial.status_code == 200, partial.text
+    assert partial.json()["dig"]["savedDepth"] == 2
+    assert partial.json()["dig"]["revealedCell"] is None
+    state = client.get(PREFIX + "/state", params=params).json()
+    assert state["digDepth"] == 2 and state["activeRun"] is None
+
+    payload = {
+        "runId": uuid4().hex,
+        "shiftId": "dig",
+        "movesLeft": 8,
+        "chargesLeft": 0,
+        "collected": 0,
+        "digDepth": 6,
+        "digStartDepth": 2,
+        "excavationSiteId": state["excavation"]["siteId"],
+    }
+    response = client.post(endpoint, params=params, json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["dig"]["revealedCell"] == {"q": chosen[0], "r": chosen[1]}
+    assert draws == [eligible, eligible]
+    assert client.post(endpoint, params=params, json=payload).json() == response.json()
+    snapshot = decode_save(client.get("/game/progress", params=params).json()["data"])
+    assert {cell.key for cell in snapshot.progress.world.cells} == known | {chosen}
+    assert snapshot.progress.activeExcavation is None
+    assert len(snapshot.progress.collection) == 1
+
+
+def test_client_can_complete_legacy_run_without_server_moves(
+    client: TestClient,
+) -> None:
+    params = player(client)
+    run = start(client, params)
+    payload = {
+        "runId": run["runId"],
+        "shiftId": "sawmill",
+        "movesLeft": 23,
+        "chargesLeft": 1,
+        "collected": 3,
+        "legacyRevision": run["revision"],
+    }
+    response = client.post(PREFIX + "/results", params=params, json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["credited"] == 3
+    assert client.get(PREFIX + "/state", params=params).json()["activeRun"] is None
+    legacy_finish = client.post(PREFIX + f"/runs/{run['runId']}/finish", params=params)
+    assert legacy_finish.json() == response.json()
+
+
+def test_client_pause_checkpoints_board_and_only_final_result_credits(
+    client: TestClient,
+) -> None:
+    params = player(client)
+    pause_url, result_url = PREFIX + "/pause", PREFIX + "/results"
+    payload = {
+        "runId": uuid4().hex,
+        "shiftId": "sawmill",
+        "movesLeft": 23,
+        "chargesLeft": 1,
+        "collected": 3,
+    }
+    board = engine.create_board(RULES["sawmill"].chips, engine.RandomStream(17).next)
+    first = client.post(pause_url, params=params, json={**payload, "board": board})
+    assert first.status_code == 200, first.text
+    paused = first.json()
+    assert paused["clientManaged"] and paused["board"] == board
+    assert (paused["movesLeft"], paused["chargesLeft"], paused["collected"]) == (
+        23,
+        1,
+        3,
+    )
+    assert (
+        client.post(pause_url, params=params, json={**payload, "board": board}).json()
+        == paused
+    )
+    state = client.get(PREFIX + "/state", params=params).json()
+    assert state["activeRun"] == paused
+    assert state["warehouse"]["wood"]["amount"] == 120
+    snapshot = decode_save(client.get("/game/progress", params=params).json()["data"])
+    assert snapshot.progress.completedShifts == 0
+    old_finish = client.post(PREFIX + f"/runs/{paused['runId']}/finish", params=params)
+    assert old_finish.json()["code"] == "client_managed"
+
+    second = client.post(
+        pause_url,
+        params=params,
+        json={
+            **payload,
+            "legacyRevision": paused["revision"],
+            "board": board,
+            "movesLeft": 22,
+            "collected": 6,
+        },
+    )
+    assert second.status_code == 200, second.text
+    conflict = client.post(
+        pause_url,
+        params=params,
+        json={
+            **payload,
+            "legacyRevision": paused["revision"],
+            "board": board,
+            "movesLeft": 21,
+            "collected": 9,
+        },
+    )
+    assert conflict.status_code == 409
+    final_payload = {
+        **payload,
+        "legacyRevision": second.json()["revision"],
+        "movesLeft": 22,
+        "collected": 6,
+    }
+    result = client.post(result_url, params=params, json=final_payload)
+    assert result.status_code == 200, result.text
+    assert result.json()["credited"] == 6
+    assert (
+        client.post(result_url, params=params, json=final_payload).json()
+        == result.json()
+    )
+    state = client.get(PREFIX + "/state", params=params).json()
+    assert state["activeRun"] is None
+    assert state["warehouse"]["wood"]["amount"] == 126
+
+
+def test_client_pause_dig_saves_depth_without_revealing_a_cell(
+    client: TestClient,
+) -> None:
+    params = player(client)
+    before = decode_save(client.get("/game/progress", params=params).json()["data"])
+    payload = {
+        "runId": uuid4().hex,
+        "shiftId": "dig",
+        "movesLeft": 18,
+        "chargesLeft": 0,
+        "collected": 0,
+        "digDepth": 2,
+        "board": engine.create_board(
+            RULES["dig"].chips,
+            engine.RandomStream(17).next,
+            CellPosition(row=3, column=3),
+        ),
+    }
+    pause = client.post(PREFIX + "/pause", params=params, json=payload)
+    assert pause.status_code == 200, pause.text
+    saved = pause.json()
+    state = client.get(PREFIX + "/state", params=params).json()
+    assert state["digDepth"] == 2
+    assert state["excavation"]["siteId"] == saved["excavationSiteId"]
+    assert state["activeRun"]["amphora"] == {"row": 3, "column": 3}
+    after = decode_save(client.get("/game/progress", params=params).json()["data"])
+    assert after.progress.world.cells == before.progress.world.cells
+    assert after.progress.collection == before.progress.collection
+    assert after.progress.completedShifts == before.progress.completedShifts
+    payload.pop("board")
+    payload.update(
+        {
+            "legacyRevision": saved["revision"],
+            "excavationSiteId": saved["excavationSiteId"],
+            "digStartDepth": 2,
+            "digDepth": 6,
+            "movesLeft": 13,
+        }
+    )
+    finish = client.post(PREFIX + "/results", params=params, json=payload)
+    assert finish.status_code == 200, finish.text
+    assert finish.json()["dig"]["revealedCell"] is not None

@@ -152,7 +152,7 @@ class Run(Model):
     schemaVersion: Literal[1] = 1
     rules: Rules
     board: Board
-    rngState: Annotated[int, Field(ge=1, le=2**32 - 1)]
+    rngState: Annotated[int, Field(ge=1, le=2**32 - 1)] | None = None
     movesLeft: Natural
     chargesLeft: Natural
     collected: Natural = 0
@@ -162,9 +162,12 @@ class Run(Model):
     status: Literal["active", "finished"] = "active"
     result: Result | None = None
     settledAt: Timestamp | None = None
+    clientManaged: bool = False
 
     @model_validator(mode="after")
     def valid_run(self) -> Self:
+        if not self.clientManaged and self.rngState is None:
+            raise ValueError("Отсутствует состояние генератора серверной смены")
         if len(self.board) != 8 or any(len(row) != 8 for row in self.board):
             raise ValueError("Поле должно иметь размер 8×8")
         if any(chip not in self.rules.chips for row in self.board for chip in row):
@@ -218,6 +221,8 @@ class RunView(Model):
     revision: Natural
     status: Literal["active", "finished"]
     result: Result | None
+    clientManaged: bool = False
+    excavationSiteId: str | None = None
 
 
 class MoveResponse(RunView):
@@ -331,3 +336,22 @@ class LightningRequest(Model):
 
 class FinishRequest(Model):
     expectedRevision: Natural | None = None
+
+
+class ClientResultRequest(Model):
+    runId: Annotated[UUID, Field(strict=False)]
+    shiftId: ShiftId
+    movesLeft: Natural
+    chargesLeft: Natural
+    collected: Natural
+    digDepth: Annotated[int, Field(ge=0, le=6)] = 0
+    digStartDepth: Annotated[int, Field(ge=0, le=6)] = 0
+    excavationSiteId: str | None = None
+    legacyRevision: Natural | None = None
+
+
+class PauseRequest(ClientResultRequest):
+    board: Annotated[
+        list[Annotated[list[ChipId], Field(min_length=8, max_length=8)]],
+        Field(min_length=8, max_length=8),
+    ]

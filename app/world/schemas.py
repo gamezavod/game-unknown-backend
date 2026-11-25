@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import Field
 
-from app.world.state import Model, Position, Timestamp
+from app.world.state import Cell, Model, Position, Timestamp
 
 
 class OpenWorld(Model):
@@ -38,3 +38,4 @@ class StoredSave(Model):
     playerId: UUID
     data: str
     serverSavedAt: Timestamp
+    fogPreview: list[Cell] = Field(default_factory=list)
