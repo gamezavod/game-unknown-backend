@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.models import Match3RunRow, WorldSave
+from app.world.generator import GENERATOR_V2, can_generate_cell, fog_preview
 from app.world.progress import advance_growth, apply_action, new_progress
 from app.world.repository import WorldRepository
 from app.world.schemas import ActionRequest, OpenWorld, SaveRequest, StoredSave
@@ -12,6 +13,7 @@ from app.world.state import (
     GameProgress,
     SaveDataError,
     SaveGame,
+    World,
     decode_save,
     encode_save,
 )
@@ -27,7 +29,10 @@ class WorldError(Exception):
 def wire(save: SaveGame, player_id: UUID) -> StoredSave:
     assert save.serverSavedAt is not None
     return StoredSave(
-        playerId=player_id, data=encode_save(save), serverSavedAt=save.serverSavedAt
+        playerId=player_id,
+        data=encode_save(save),
+        serverSavedAt=save.serverSavedAt,
+        fogPreview=fog_preview(save.progress.world),
     )
 
 
@@ -100,6 +105,7 @@ class WorldService:
             return self.load(player_id)
         if body.initialSave is not None:
             progress = self.decode(body.initialSave).progress
+            self.validate_footprint(progress.world)
         else:
             try:
                 progress = new_progress(
@@ -145,6 +151,14 @@ class WorldService:
             return wire(save, player_id)
         return self.record(row, progress, save)
 
+    def validate_footprint(self, world: World) -> None:
+        if world.generatorVersion == GENERATOR_V2 and any(
+            c.type == "water" or not can_generate_cell(world, c.key)
+            for c in world.cells
+        ):
+            self.repo.rollback()
+            raise WorldError(400, "Снимок содержит клетки за пределами острова")
+
     def replace(self, player_id: UUID, body: SaveRequest) -> StoredSave:
         incoming = self.decode(body.data)
         row, save = self.locked(player_id)
@@ -181,6 +195,7 @@ class WorldService:
         ):
             self.repo.rollback()
             raise WorldError(400, "Снимок теряет уже открытые клетки")
+        self.validate_footprint(incoming.progress.world)
         if incoming.progress == save.progress:
             self.repo.commit()
             return wire(save, player_id)

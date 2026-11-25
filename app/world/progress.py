@@ -49,7 +49,8 @@ def apply_action(
     if kind == "reveal":
         if cell:
             return progress
-        if not any(n in {c.key for c in progress.world.cells} for n in neighbors(p)):
+        known = {c.key for c in progress.world.cells}
+        if not any(n in known for n in neighbors(p)):
             raise ValueError("Можно открыть только соседнюю клетку тумана")
         result = progress.model_copy(deep=True)
         result.world.cells.append(generate_cell(progress.world, p))

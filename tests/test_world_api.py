@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_engine
 from app.models import WorldSave
-from app.world.progress import new_progress
+from app.world.generator import generate_world
 from app.world.schemas import StoredSave
 from app.world.state import decode_save, encode_save
 
@@ -52,13 +52,13 @@ def test_public_players_keep_separate_progress(client: TestClient) -> None:
         decode_save(
             client.get("/game/progress?user_id=other", params=first).json()["data"]
         ).progress.world.seed
-        == "one"
+        == generate_world("one").seed
     )
     assert (
         decode_save(
             client.get("/game/progress", params=second).json()["data"]
         ).progress.world.seed
-        == "two"
+        == generate_world("two").seed
     )
     assert open_world(client, first, "replacement") == a
     assert (
@@ -85,12 +85,22 @@ def test_landscape_and_revealed_cells_persist(client: TestClient) -> None:
     )
     assert response.status_code == 200
     chopped = StoredSave.model_validate_json(response.text)
-    response = action(
-        client, params, chopped, {"type": "reveal", "position": {"q": 4, "r": 0}}
-    )
+    preview = chopped.fogPreview[0]
+    position = {"q": preview.q, "r": preview.r}
+    assert preview.state == "unexplored"
+    response = action(client, params, chopped, {"type": "reveal", "position": position})
     assert response.status_code == 200
-    saved = decode_save(client.get("/game/progress", params=params).json()["data"])
-    assert len(saved.progress.world.cells) == 38
+    restored = StoredSave.model_validate_json(
+        client.get("/game/progress", params=params).text
+    )
+    saved = decode_save(restored.data)
+    assert len(saved.progress.world.cells) == 26
+    assert {c.key for c in restored.fogPreview}.isdisjoint(
+        c.key for c in saved.progress.world.cells
+    )
+    assert next(
+        c for c in saved.progress.world.cells if c.key == preview.key
+    ) == preview.model_copy(update={"state": "visible"})
     assert all(c.state == "visible" for c in saved.progress.world.cells)
     assert (
         next(c for c in saved.progress.world.cells if c.key == forest.key).type
@@ -149,12 +159,25 @@ def test_two_devices_choose_server_snapshot_and_do_not_merge(
         assert device2.get(
             "/game/progress", params=params
         ).json() == original.model_dump(mode="json")
+        first_preview, second_preview = original.fogPreview[:2]
         first = action(
-            client, params, original, {"type": "reveal", "position": {"q": 4, "r": 0}}
+            client,
+            params,
+            original,
+            {
+                "type": "reveal",
+                "position": {"q": first_preview.q, "r": first_preview.r},
+            },
         )
         assert first.status_code == 200
         second = action(
-            device2, params, original, {"type": "reveal", "position": {"q": -4, "r": 0}}
+            device2,
+            params,
+            original,
+            {
+                "type": "reveal",
+                "position": {"q": second_preview.q, "r": second_preview.r},
+            },
         )
         assert second.status_code == 409
         assert second.json()["current"] == first.json()
@@ -242,10 +265,26 @@ def test_corrupt_and_unknown_saves_do_not_overwrite(client: TestClient) -> None:
         assert db.scalars(select(WorldSave)).one().data == {"schemaVersion": 999}
 
 
-def test_import_migration_and_unknown_generator(client: TestClient) -> None:
+@pytest.mark.parametrize("generator_version", [1, 999])
+def test_import_migration_and_unsupported_generator(
+    client: TestClient, generator_version: int
+) -> None:
     params = player()
-    p = new_progress("legacy").model_dump(mode="json")
-    p["world"]["generatorVersion"] = 999
+    p = {
+        "world": {
+            "seed": "legacy",
+            "generatorVersion": generator_version,
+            "cells": [
+                {"q": 0, "r": 0, "type": "grass", "height": 1.45, "state": "visible"},
+                {"q": 0, "r": 1, "type": "water", "height": 0.04, "state": "visible"},
+            ],
+        },
+        "saplings": [],
+        "excavationSites": [{"id": "dig:1:0", "q": 1, "r": 0}],
+        "activeExcavation": {"siteId": "dig:1:0", "depth": 3, "paid": True},
+        "collection": [],
+        "completedShifts": 0,
+    }
     response = client.post(
         "/game/session",
         params=params,
@@ -254,12 +293,21 @@ def test_import_migration_and_unknown_generator(client: TestClient) -> None:
     assert response.status_code == 200
     imported = StoredSave.model_validate_json(response.text)
     assert decode_save(imported.data).progress.model_dump(mode="json") == p
-    assert (
-        action(
-            client, params, imported, {"type": "reveal", "position": {"q": 4, "r": 0}}
-        ).status_code
-        == 400
+    assert imported.fogPreview == []
+
+    reveal = action(
+        client, params, imported, {"type": "reveal", "position": {"q": 1, "r": 0}}
     )
+    assert reveal.status_code == 400
+    assert str(generator_version) in reveal.json()["detail"]
+    state = client.get("/game/match3/state", params=params)
+    assert state.status_code == 200
+    assert state.json()["excavation"]["terrain"] == "fog"
+    assert state.json()["excavation"]["depth"] == 3
+    dig = next(shift for shift in state.json()["shifts"] if shift["shiftId"] == "dig")
+    assert not dig["available"]
+    assert [reason["code"] for reason in dig["reasons"]] == ["unsupported_generator"]
+
     assert client.get("/game/progress", params=params).json() == imported.model_dump(
         mode="json"
     )
@@ -370,4 +418,27 @@ def test_game_openapi_has_no_security_requirement(client: TestClient) -> None:
     assert client.get("/me").status_code == 401
     assert (
         client.get("/game/progress", params={"player_id": "invalid"}).status_code == 422
+    )
+
+
+def test_sea_is_neither_revealed_nor_added_to_snapshot(client: TestClient) -> None:
+    params = player()
+    stored = open_world(client, params)
+    saved = decode_save(stored.data)
+    shore = next(cell for cell in saved.progress.world.cells if cell.r == 3)
+    south = {"q": shore.q, "r": 4}
+    reveal = action(client, params, stored, {"type": "reveal", "position": south})
+    assert reveal.status_code == 400 and "за пределами острова" in reveal.text
+    data = saved.model_dump(mode="json")
+    data["progress"]["world"]["cells"].append(
+        {**south, "type": "grass", "height": 1.45, "state": "visible"}
+    )
+    replaced = client.put(
+        "/game/progress",
+        params=params,
+        json={"data": json.dumps(data), "expectedServerSavedAt": stored.serverSavedAt},
+    )
+    assert replaced.status_code == 400
+    assert client.get("/game/progress", params=params).json() == stored.model_dump(
+        mode="json"
     )

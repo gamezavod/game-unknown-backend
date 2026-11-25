@@ -16,7 +16,7 @@ from app.match3 import engine
 from app.match3.config import RULES
 from app.match3.state import CellPosition, Profile, Run, ShiftId
 from app.models import Match3ProfileRow, Match3ReceiptRow, Match3RunRow
-from app.world.generator import CONFIG, neighbors
+from app.world.generator import island_layout, neighbors
 from app.world.state import decode_save
 
 PREFIX = "/game/match3"
@@ -506,10 +506,14 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     client: TestClient,
 ) -> None:
     params = player(client)
+    original = client.get("/game/progress", params=params).json()
+    first = original["fogPreview"][0]
+    target = {"q": first["q"], "r": first["r"]}
+    site_id = f"dig:{target['q']}:{target['r']}"
     response = client.post(
         PREFIX + "/runs",
         params=params,
-        json={"shiftId": "dig", "target": {"q": 4, "r": 0}},
+        json={"shiftId": "dig", "target": target},
     )
     assert response.status_code == 201, response.text
     run = response.json()
@@ -519,8 +523,8 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     assert result.json()["dig"]["savedDepth"] == 3
     state = client.get(PREFIX + "/state", params=params).json()
     assert state["excavation"] == {
-        "siteId": "dig:4:0",
-        "position": {"q": 4, "r": 0},
+        "siteId": site_id,
+        "position": target,
         "terrain": state["excavation"]["terrain"],
         "depth": 3,
         "targetDepth": 6,
@@ -528,7 +532,7 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     }
     assert state["warehouse"]["food"]["amount"] == 80
     saved = decode_save(client.get("/game/progress", params=params).json()["data"])
-    assert len(saved.progress.world.cells) == 37
+    assert len(saved.progress.world.cells) == 25
     assert (
         saved.progress.activeExcavation is not None
         and saved.progress.activeExcavation.paid
@@ -559,11 +563,13 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     assert found.status_code == 200, found.text
     assert found.json()["status"] == "finished"
     discovery = found.json()["result"]["dig"]
-    assert discovery["finding"]["siteId"] == "dig:4:0"
-    assert discovery["revealedCell"] == {"q": 4, "r": 0}
+    assert discovery["finding"]["siteId"] == site_id
+    assert discovery["revealedCell"] == target
     world = decode_save(client.get("/game/progress", params=params).json()["data"])
-    assert len(world.progress.world.cells) == 38
-    assert (4, 0) in {cell.key for cell in world.progress.world.cells}
+    assert len(world.progress.world.cells) == 26
+    assert (target["q"], target["r"]) in {
+        cell.key for cell in world.progress.world.cells
+    }
     assert (
         world.progress.activeExcavation is None and len(world.progress.collection) == 1
     )
@@ -575,7 +581,7 @@ def test_dig_resume_keeps_payment_and_finding_opens_exact_selected_target(
     )
     unchanged = decode_save(client.get("/game/progress", params=params).json()["data"])
     assert (
-        len(unchanged.progress.world.cells) == 38
+        len(unchanged.progress.world.cells) == 26
         and len(unchanged.progress.collection) == 1
     )
     assert (
@@ -851,11 +857,12 @@ def test_client_dig_preserves_depth_and_opens_random_allowed_cell(
     endpoint = PREFIX + "/results"
     initial = decode_save(client.get("/game/progress", params=params).json()["data"])
     known = {cell.key for cell in initial.progress.world.cells}
+    island = island_layout(initial.progress.world.seed)
     eligible = {
         p
         for cell in known
         for p in neighbors(cell)
-        if p not in known and p[1] <= CONFIG.start_radius
+        if p not in known and island.contains(p)
     }
     chosen = sorted(eligible)[-1]
     draws: list[set[tuple[int, int]]] = []

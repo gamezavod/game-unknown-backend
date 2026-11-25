@@ -38,7 +38,12 @@ from app.match3.state import (
     Warehouse,
 )
 from app.models import Match3ProfileRow, Match3ReceiptRow, Match3RunRow, WorldSave
-from app.world.generator import CONFIG, distance, generate_cell, neighbors
+from app.world.generator import (
+    GENERATOR_V2,
+    can_generate_cell,
+    generate_cell,
+    world_frontier,
+)
 from app.world.repository import WorldRepository
 from app.world.service import WorldService
 from app.world.state import (
@@ -181,33 +186,26 @@ class Match3Service:
             reasons.append(
                 Reason(code="warehouse_full", message="Склад этого ресурса заполнен")
             )
-        if rules.shiftId == "dig" and ctx.saved.progress.world.generatorVersion != 1:
-            reasons.append(
-                Reason(
-                    code="unsupported_generator",
-                    message="Версия генератора пока не поддерживает расширение",
+        if rules.shiftId == "dig":
+            if ctx.saved.progress.world.generatorVersion != GENERATOR_V2:
+                reasons.append(
+                    Reason(
+                        code="unsupported_generator",
+                        message="Эта версия генератора не поддерживает расширение",
+                    )
                 )
-            )
-        if rules.shiftId == "dig" and not self.site_available(ctx.saved.progress):
-            reasons.append(
-                Reason(
-                    code="no_excavation_site", message="Нет доступного участка раскопок"
+            elif not self.site_available(ctx.saved.progress):
+                reasons.append(
+                    Reason(
+                        code="no_excavation_site",
+                        message="Нет доступного участка раскопок",
+                    )
                 )
-            )
         return reasons
 
     @staticmethod
     def frontier(progress: GameProgress) -> list[tuple[int, int]]:
-        known = {cell.key for cell in progress.world.cells}
-        return sorted(
-            {
-                p
-                for cell in progress.world.cells
-                for p in neighbors(cell.key)
-                if p not in known and p[1] <= CONFIG.start_radius
-            },
-            key=lambda p: (distance(p), p),
-        )
+        return world_frontier(progress.world)
 
     @staticmethod
     def site_available(progress: GameProgress) -> bool:
@@ -268,21 +266,28 @@ class Match3Service:
             ),
             None,
         )
+        excavation = None
+        if dig and site:
+            world = ctx.saved.progress.world
+            terrain = next(
+                (cell.type for cell in world.cells if cell.key == site.key), "fog"
+            )
+            if terrain == "fog" and can_generate_cell(world, site.key):
+                terrain = generate_cell(world, site.key).type
+            excavation = ExcavationView(
+                siteId=dig.siteId,
+                position=Position(q=site.q, r=site.r),
+                terrain=terrain,
+                depth=dig.depth,
+                paid=dig.paid,
+            )
         assert ctx.saved.serverSavedAt is not None
         result = StateResponse(
             playerId=player,
             serverSavedAt=ctx.saved.serverSavedAt,
             warehouse=self.warehouse(ctx.profile),
             digDepth=dig.depth if dig else 0,
-            excavation=ExcavationView(
-                siteId=dig.siteId,
-                position=Position(q=site.q, r=site.r),
-                terrain=generate_cell(ctx.saved.progress.world, site.key).type,
-                depth=dig.depth,
-                paid=dig.paid,
-            )
-            if dig and site
-            else None,
+            excavation=excavation,
             shifts=shifts,
             activeRun=self.view(ctx, active_row, active)
             if active_row and active
